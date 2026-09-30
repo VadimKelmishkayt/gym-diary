@@ -199,6 +199,506 @@ function fmt(x){ return Number(x).toFixed(1).replace(/\.0$/,"").replace(".",",")
 function keyFor(date,d){ return PREFIX+date.replace(/-/g,"")+"_"+d; }
 
 /* ---------- storage: Telegram CloudStorage, с запасным localStorage ---------- */
+var cloud = (function(){
+  try{
+    if(!tg || !tg.CloudStorage || typeof tg.CloudStorage.getKeys !== "function") return null;
+    if(!tg.initData && (!tg.platform || tg.platform === "unknown")) return null;
+    if(tg.isVersionAtLeast && !tg.isVersionAtLeast("6.9")) return null;
+    return tg.CloudStorage;
+  }catch(e){ return null; }
+})();
+
+var Store = {
+  mode: cloud ? "cloud" : "local",
+  loadAll: function(){
+    if(cloud) return new Promise(function(res,rej){
+      cloud.getKeys(function(err,keys){
+        if(err) return rej(err);
+        var mine=(keys||[]).filter(function(k){ return k.indexOf(PREFIX)===0; });
+        if(!mine.length) return res([]);
+        var out=[], chunks=[];
+        for(var i=0;i<mine.length;i+=50) chunks.push(mine.slice(i,i+50));
+        var left=chunks.length;
+        chunks.forEach(function(c){
+          cloud.getItems(c,function(e2,vals){
+            if(!e2&&vals) Object.keys(vals).forEach(function(k){
+              try{ var o=JSON.parse(vals[k]); if(o&&o.date) out.push(o); }catch(x){}
+            });
+            if(--left===0) res(out);
+          });
+        });
+      });
+    });
+    return new Promise(function(res){
+      var out=[];
+      try{
+        for(var i=0;i<localStorage.length;i++){
+          var k=localStorage.key(i);
+          if(k&&k.indexOf(PREFIX)===0){ try{ var o=JSON.parse(localStorage.getItem(k)); if(o&&o.date) out.push(o); }catch(x){} }
+        }
+      }catch(e){}
+      res(out);
+    });
+  },
+  put: function(rec){
+    var k=keyFor(rec.date,rec.day), v=JSON.stringify(rec);
+    if(v.length>4000) return Promise.reject({message:"запись слишком большая"});
+    if(cloud) return new Promise(function(res,rej){
+      cloud.setItem(k,v,function(err,ok){ if(err||!ok) rej(err||{message:"отказано"}); else res(); });
+    });
+    return new Promise(function(res,rej){
+      try{ localStorage.setItem(k,v); res(); }catch(e){ rej(e); }
+    });
+  }
+};
+
+var _loadAll = Store.loadAll.bind(Store), _put = Store.put.bind(Store);
+Store.loadAll = function(){
+  return _loadAll().catch(function(){ cloud=null; Store.mode="local"; return _loadAll(); });
+};
+Store.put = function(rec){
+  return _put(rec).catch(function(e){
+    if(cloud){ cloud=null; Store.mode="local"; return _put(rec); }
+    throw e;
+  });
+};
+
+/* ---------- расчёт прогрессии ---------- */
+function lastFor(key, exId, curDate){
+  for(var i=0;i<logs.length;i++){
+    var L=logs[i];
+    if(L.day!==key||L.skipped||!L.date) continue;
+    if(curDate&&L.date>=curDate) continue;
+    var arr=(L.sets&&L.sets[exId])||[];
+    var done=arr.filter(function(s){ return num(s.w)>0&&num(s.r)>0; });
+    if(done.length) return {date:L.date, sets:done};
+  }
+  return null;
+}
+function daysBetween(a,b){
+  var x=Date.parse(a+"T00:00:00Z"), y=Date.parse(b+"T00:00:00Z");
+  if(!isFinite(x)||!isFinite(y)) return 0;
+  return Math.max(0,Math.round((y-x)/86400000));
+}
+function gapFor(key,lastDate,curDate){
+  var skips=logs.filter(function(L){ return L.skipped&&L.day===key&&L.date>lastDate&&L.date<curDate; }).length;
+  return {skips:skips, days:daysBetween(lastDate,curDate)};
+}
+function roundStep(v,step){ return Math.max(step, Math.round(v/step)*step); }
+function advise(ex, last, gap){
+  if(!last) return {code:"new", badge:"первый раз", text:"Подберите вес, с которым чисто выходит "+ex.lo+"–"+ex.hi+" повторов.", target:null};
+  var tops=last.sets.map(function(s){ return num(s.w); });
+  var top=Math.max.apply(null,tops);
+  var atTop=last.sets.filter(function(s){ return num(s.w)>=top-0.01; });
+  var allHi=atTop.every(function(s){ return num(s.r)>=ex.hi; });
+  var anyLow=last.sets.some(function(s){ return num(s.r)<ex.lo; });
+  var skips=gap?gap.skips:0, days=gap?gap.days:0;
+  if(skips>=2||days>=21){
+    var back=roundStep(top*0.9,ex.step);
+    return {code:"deload", badge:"откат до "+fmt(back)+" кг", text:"Перерыв "+days+" дн."+(skips?" ("+skips+" пропуска)":"")+". Начните с "+fmt(back)+" кг и вернитесь к "+fmt(top)+" кг за две-три тренировки.", target:back};
+  }
+  if(skips>=1||days>=12) return {code:"hold", badge:"повторить вес", text:"После пропуска повторите "+fmt(top)+" кг в том же коридоре. Прибавка — со следующей тренировки.", target:top};
+  if(allHi) return {code:"up", badge:"+"+fmt(ex.step)+" кг", text:"Коридор закрыт на "+fmt(top)+" кг — ставьте "+fmt(top+ex.step)+" кг и возвращайтесь к "+ex.lo+" повторам.", target:top+ex.step};
+  if(anyLow) return {code:"hold", badge:"держать вес", text:"Один из подходов ушёл ниже "+ex.lo+" повторов. Оставьте "+fmt(top)+" кг, пока все подходы не войдут в коридор.", target:top};
+  return {code:"reps", badge:"добрать повторы", text:"Оставьте "+fmt(top)+" кг и тяните каждый подход к "+ex.hi+" повторам.", target:top};
+}
+function adviceFor(ex,key,date){
+  var last=lastFor(key,ex.id,date);
+  return {last:last, a:advise(ex,last,last?gapFor(key,last.date,date):null)};
+}
+
+/* ---------- интерфейс ---------- */
+function pickDay(){
+  var t=new Date().getDay();
+  for(var i=0;i<ORDER.length;i++) if(PROGRAM[ORDER[i]].dow===t) return ORDER[i];
+  return "tue";
+}
+function nextDate(key){
+  var target=PROGRAM[key].dow, d=new Date();
+  for(var i=0;i<8;i++){ if(d.getDay()===target) return iso(d); d.setDate(d.getDate()+1); }
+  return iso(new Date());
+}
+function buildDays(){
+  var box=document.getElementById("days");
+  box.innerHTML="";
+  ORDER.forEach(function(k){
+    var b=document.createElement("button");
+    b.className="day"; b.type="button"; b.setAttribute("aria-pressed", String(k===day));
+    b.innerHTML='<span>'+PROGRAM[k].label+'</span><small>'+PROGRAM[k].sub+'</small>';
+    b.addEventListener("click",function(){ day=k; document.getElementById("date").value=nextDate(k); render(); });
+    box.appendChild(b);
+  });
+}
+function syncSkip(){
+  var on=document.getElementById("skip").checked;
+  document.getElementById("cards").classList.toggle("off",on);
+  document.getElementById("skipnote").hidden=!on;
+  document.getElementById("prefill").disabled=on;
+  document.getElementById("save").textContent=on?"Отметить пропуск":"Сохранить тренировку";
+}
+function render(){
+  buildDays();
+  var date=document.getElementById("date").value;
+  var cards=document.getElementById("cards");
+  var existing=null;
+  for(var i=0;i<logs.length;i++) if(logs[i].day===day&&logs[i].date===date){ existing=logs[i]; break; }
+  if(existing&&existing.bw) document.getElementById("bw").value=existing.bw;
+  document.getElementById("skip").checked=!!(existing&&existing.skipped);
+  syncSkip();
+  cards.innerHTML="";
+  PROGRAM[day].ex.forEach(function(ex,i){
+    var r=adviceFor(ex,day,date), last=r.last, a=r.a;
+    var saved=existing&&!existing.skipped&&existing.sets&&existing.sets[ex.id]?existing.sets[ex.id]:null;
+    var card=document.createElement("div");
+    card.className="card";
+    var html='<h3>'+(i+1)+'. '+ex.n+'</h3>'+
+      '<p class="spec">'+ex.sets+' подхода · '+ex.lo+'–'+ex.hi+' повторов · шаг '+fmt(ex.step)+' кг · '+ex.gear+'</p>'+
+      '<div class="advice"><span class="badge '+a.code+'">'+a.badge+'</span><span>'+a.text+'</span></div>';
+    if(last) html+='<p class="spec">Прошлый раз '+human(last.date)+': '+last.sets.map(function(s){ return fmt(num(s.w))+"×"+num(s.r); }).join(", ")+'</p>';
+    html+='<div class="sets"><span class="hd"></span><span class="hd">Вес, кг</span><span class="hd">Повторы</span>';
+    for(var s=0;s<ex.sets;s++){
+      var v=saved&&saved[s]?saved[s]:null;
+      var w=v&&num(v.w)?fmt(num(v.w)):(a.target&&!saved?fmt(a.target):"");
+      var rp=v&&num(v.r)?num(v.r):"";
+      html+='<span class="n">'+(s+1)+'</span>'+
+        '<input type="number" inputmode="decimal" step="0.5" min="0" id="w-'+day+'-'+ex.id+'-'+s+'" value="'+w+'" aria-label="'+ex.n+', подход '+(s+1)+', вес">'+
+        '<input type="number" inputmode="numeric" step="1" min="0" id="r-'+day+'-'+ex.id+'-'+s+'" value="'+rp+'" aria-label="'+ex.n+', подход '+(s+1)+', повторы">';
+    }
+    html+='</div>';
+    card.innerHTML=html;
+    cards.appendChild(card);
+  });
+  renderHist();
+}
+function renderHist(){
+  var box=document.getElementById("hist");
+  if(!logs.length){ box.innerHTML='<p class="empty">Пока ничего не записано.</p>'; return; }
+  box.innerHTML="";
+  logs.slice(0,10).forEach(function(L){
+    var prog=PROGRAM[L.day];
+    var row=document.createElement("div");
+    row.className="hrow";
+    if(L.skipped){
+      row.innerHTML='<b>'+human(L.date)+' · '+(prog?prog.label:L.day)+'</b><em>пропущено</em>';
+      box.appendChild(row); return;
+    }
+    var vol=0, done=0;
+    Object.keys(L.sets||{}).forEach(function(k){
+      (L.sets[k]||[]).forEach(function(s){ var w=num(s.w), r=num(s.r); if(w&&r){ vol+=w*r; done++; } });
+    });
+    row.innerHTML='<b>'+human(L.date)+' · '+(prog?prog.label:L.day)+'</b><em>'+done+' подходов · '+Math.round(vol)+' кг тоннаж'+(L.bw?' · вес тела '+fmt(L.bw):'')+'</em>';
+    box.appendChild(row);
+  });
+}
+function collect(){
+  var sets={};
+  PROGRAM[day].ex.forEach(function(ex){
+    var arr=[];
+    for(var s=0;s<ex.sets;s++){
+      arr.push({w:num(document.getElementById("w-"+day+"-"+ex.id+"-"+s).value),
+                r:num(document.getElementById("r-"+day+"-"+ex.id+"-"+s).value)});
+    }
+    sets[ex.id]=arr;
+  });
+  return sets;
+}
+function setStatus(t,err){
+  var el=document.getElementById("status");
+  el.textContent=t; el.className="status"+(err?" err":"");
+}
+function sortLogs(){ logs.sort(function(a,b){ return a.date<b.date?1:(a.date>b.date?-1:0); }); }
+
+document.getElementById("date").addEventListener("change",render);
+document.getElementById("skip").addEventListener("change",syncSkip);
+
+document.getElementById("prefill").addEventListener("click",function(){
+  var date=document.getElementById("date").value;
+  PROGRAM[day].ex.forEach(function(ex){
+    var a=adviceFor(ex,day,date).a;
+    if(!a.target) return;
+    for(var s=0;s<ex.sets;s++){
+      var el=document.getElementById("w-"+day+"-"+ex.id+"-"+s);
+      if(!num(el.value)) el.value=fmt(a.target);
+    }
+  });
+  setStatus("Веса подставлены. Повторы впишите после подходов.",false);
+});
+
+document.getElementById("save").addEventListener("click",function(){
+  if(saving) return;
+  var date=document.getElementById("date").value;
+  if(!date){ setStatus("Укажите дату тренировки.",true); return; }
+  var skipped=document.getElementById("skip").checked;
+  var sets=skipped?{}:collect();
+  if(!skipped){
+    var filled=Object.keys(sets).some(function(k){ return sets[k].some(function(s){ return s.w>0&&s.r>0; }); });
+    if(!filled){ setStatus("Заполните хотя бы один подход: вес и повторы.",true); haptic("error"); return; }
+  }
+  saving=true; setStatus("Сохраняю…",false);
+  var rec={date:date, day:day, skipped:skipped, bw:skipped?null:(num(document.getElementById("bw").value)||null), sets:sets};
+  Store.put(rec).then(function(){
+    logs=logs.filter(function(L){ return !(L.date===rec.date&&L.day===rec.day); });
+    logs.push(rec); sortLogs(); render();
+    setStatus(skipped?("Пропуск "+human(date)+" отмечен."):("Тренировка "+human(date)+" сохранена."),false);
+    haptic("success");
+    saving=false;
+  }).catch(function(e){
+    setStatus("Не удалось сохранить: "+((e&&e.message)||"ошибка")+".",true);
+    haptic("error"); saving=false;
+  });
+});
+
+document.getElementById("export").addEventListener("click",function(){
+  var blob=new Blob([JSON.stringify({app:"shtanga",v:1,logs:logs},null,1)],{type:"application/json"});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement("a");
+  a.href=url; a.download="dnevnik-shtangi.json"; document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); },1000);
+  setStatus("Копия выгружена в файл.",false);
+});
+document.getElementById("importBtn").addEventListener("click",function(){ document.getElementById("importFile").click(); });
+document.getElementById("importFile").addEventListener("change",function(ev){
+  var f=ev.target.files&&ev.target.files[0];
+  if(!f) return;
+  var fr=new FileReader();
+  fr.onload=function(){
+    var data;
+    try{ data=JSON.parse(String(fr.result)); }catch(e){ setStatus("Файл не читается как JSON.",true); return; }
+    var incoming=(data&&data.logs)||[];
+    if(!incoming.length){ setStatus("В файле нет записей.",true); return; }
+    setStatus("Загружаю "+incoming.length+" записей…",false);
+    var chain=Promise.resolve(), okCount=0;
+    incoming.forEach(function(rec){
+      if(!rec||!rec.date||!PROGRAM[rec.day]) return;
+      chain=chain.then(function(){ return Store.put(rec).then(function(){ okCount++; },function(){}); });
+    });
+    chain.then(function(){
+      return Store.loadAll().then(function(arr){
+        logs=arr.filter(function(L){ return L.date&&PROGRAM[L.day]; }); sortLogs(); render();
+        setStatus("Загружено записей: "+okCount+".",false);
+      });
+    });
+  };
+  fr.readAsText(f);
+  ev.target.value="";
+});
+
+day=pickDay();
+document.getElementById("date").value=nextDate(day);
+render();
+
+Store.loadAll().then(function(arr){
+  logs=arr.filter(function(L){ return L.date&&PROGRAM[L.day]; });
+  sortLogs(); render();
+  var where=Store.mode==="cloud"?"":" (локально в браузере — откройте через Telegram для синхронизации)";
+  setStatus(logs.length?("Записей в дневнике: "+logs.length+where+"."):("Дневник пуст — первая запись задаст точку отсчёта"+where+"."),false);
+}).catch(function(e){
+  setStatus("Не удалось прочитать записи: "+((e&&e.message)||"ошибка")+".",true);
+});
+</script>
+</body>
+</html>
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Дневник штанги</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#F1F3F2; --surface:#FFFFFF; --sunk:#E7EAE9;
+  --ink:#14201E; --muted:#5D6B68; --line:#D6DCDA;
+  --accent:#0E7C6B; --accent-soft:#DCEDE9; --on-accent:#FFFFFF;
+  --up:#166534; --up-soft:#DCEFE0; --hold:#92400E; --hold-soft:#F6E7D3;
+  --display:"Oswald","Helvetica Neue",Arial,sans-serif;
+  --body:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#101614; --surface:#18201E; --sunk:#222B29;
+  --ink:#E6EDEA; --muted:#93A29E; --line:#2C3634;
+  --accent:#3FBFA8; --accent-soft:#16302C; --on-accent:#0B1513;
+  --up:#6EE7A8; --up-soft:#14301F; --hold:#F0B36B; --hold-soft:#332415;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#101614; --surface:#18201E; --sunk:#222B29;
+  --ink:#E6EDEA; --muted:#93A29E; --line:#2C3634;
+  --accent:#3FBFA8; --accent-soft:#16302C; --on-accent:#0B1513;
+  --up:#6EE7A8; --up-soft:#14301F; --hold:#F0B36B; --hold-soft:#332415;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.5;
+  padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+.wrap{max-width:760px;margin:0 auto;padding-inline:16px;padding-block:22px 64px}
+h1{font-family:var(--display);font-weight:500;font-size:28px;letter-spacing:.02em;margin:0;text-transform:uppercase}
+.lede{color:var(--muted);margin:6px 0 0;font-size:14px;max-width:60ch}
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-block:12px;margin-top:16px;border-bottom:1px solid var(--line)}
+.days{display:flex;gap:6px;flex-wrap:wrap}
+.day{flex:1 1 auto;min-width:0;font-family:var(--display);text-transform:uppercase;letter-spacing:.04em;font-size:14px;padding:9px 10px;border:1px solid var(--line);background:var(--surface);color:var(--muted);border-radius:6px;cursor:pointer}
+.day[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.day small{display:block;font-family:var(--body);font-size:11px;letter-spacing:0;text-transform:none;opacity:.75}
+.meta-row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-top:12px}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+input[type=date],input[type=number]{font-family:var(--body);font-size:16px;font-variant-numeric:tabular-nums;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);min-width:0}
+input[type=number]{width:100%;text-align:center}
+input:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.skipbox{display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);cursor:pointer;font-size:13.5px;user-select:none}
+.skipbox input{width:17px;height:17px;accent-color:var(--accent);margin:0}
+.skipnote{margin-top:14px;padding:12px 14px;border:1px dashed var(--line);border-radius:10px;color:var(--muted);font-size:13.5px}
+.cards{display:flex;flex-direction:column;gap:12px;margin-top:16px}
+.cards.off{opacity:.4;pointer-events:none}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h3{font-family:var(--display);font-weight:500;font-size:17px;margin:0;letter-spacing:.01em}
+.spec{color:var(--muted);font-size:12.5px;margin:3px 0 0}
+.advice{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin-top:10px;font-size:13px}
+.badge{font-family:var(--display);font-size:12px;letter-spacing:.05em;text-transform:uppercase;padding:3px 8px;border-radius:4px;background:var(--sunk);color:var(--muted);white-space:nowrap}
+.badge.up{background:var(--up-soft);color:var(--up)}
+.badge.hold,.badge.deload{background:var(--hold-soft);color:var(--hold)}
+.badge.reps{background:var(--accent-soft);color:var(--accent)}
+.advice span{color:var(--muted)}
+.sets{display:grid;grid-template-columns:auto repeat(2,minmax(0,1fr));gap:6px 8px;align-items:center;margin-top:12px}
+.sets .hd{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.sets .n{font-family:var(--display);font-size:13px;color:var(--muted);white-space:nowrap}
+.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:18px}
+button.primary{font-family:var(--display);text-transform:uppercase;letter-spacing:.05em;font-size:15px;padding:12px 20px;border:0;border-radius:6px;background:var(--accent);color:var(--on-accent);cursor:pointer}
+button.ghost{font-family:var(--body);font-size:13px;padding:10px 14px;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--muted);cursor:pointer}
+button[disabled]{opacity:.5;cursor:default}
+.status{font-size:13px;color:var(--muted);min-height:1.2em;flex:1 1 100%}
+.status.err{color:var(--hold)}
+section.block{margin-top:32px}
+section.block h2{font-family:var(--display);font-weight:500;text-transform:uppercase;letter-spacing:.05em;font-size:15px;margin:0 0 10px;color:var(--muted)}
+.hist{display:flex;flex-direction:column;gap:8px}
+.hrow{display:flex;gap:10px;justify-content:space-between;align-items:baseline;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:13px}
+.hrow b{font-family:var(--display);font-weight:500;letter-spacing:.02em}
+.hrow em{font-style:normal;color:var(--muted);font-variant-numeric:tabular-nums;text-align:right}
+.rules{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px;font-size:13.5px;color:var(--muted)}
+.rules p{margin:0 0 8px}.rules p:last-child{margin:0}
+.rules b{color:var(--ink);font-weight:500}
+.empty{color:var(--muted);font-size:13px}
+.io{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Дневник штанги</h1>
+  <p class="lede">Вносите вес и повторы по подходам. Приложение сравнивает их с прошлой такой же тренировкой и говорит, где пора прибавить.</p>
+
+  <div class="bar">
+    <div class="days" id="days"></div>
+    <div class="meta-row">
+      <div class="field" style="flex:1 1 150px">
+        <label for="date">Дата тренировки</label>
+        <input type="date" id="date">
+      </div>
+      <div class="field" style="flex:0 1 120px">
+        <label for="bw">Вес тела, кг</label>
+        <input type="number" id="bw" step="0.1" min="30" max="200" placeholder="72">
+      </div>
+      <label class="skipbox" for="skip"><input type="checkbox" id="skip">Занятие пропущено</label>
+    </div>
+  </div>
+
+  <div class="skipnote" id="skipnote" hidden>Тренировка будет отмечена как пропущенная. Веса не записываются, а расчёт следующей прибавки учтёт паузу.</div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="actions">
+    <button class="primary" id="save">Сохранить тренировку</button>
+    <button class="ghost" id="prefill">Подставить веса</button>
+    <span class="status" id="status">Загружаю записи…</span>
+  </div>
+
+  <section class="block">
+    <h2>Последние тренировки</h2>
+    <div class="hist" id="hist"><p class="empty">Пока ничего не записано.</p></div>
+  </section>
+
+  <section class="block">
+    <h2>Как считается прибавка</h2>
+    <div class="rules">
+      <p><b>Двойная прогрессия.</b> У каждого упражнения свой коридор повторов. Сначала растут повторы внутри коридора при том же весе, и только когда все рабочие подходы дошли до верхней границы — добавляется вес, а повторы падают к нижней границе.</p>
+      <p><b>Шаг прибавки</b> зависит от снаряда: штанга и платформа — 5 кг, блочные тренажёры — 2,5 кг, гантели — 2 кг.</p>
+      <p><b>Провал ниже нижней границы</b> хотя бы в одном подходе — вес остаётся прежним до следующего раза.</p>
+      <p><b>Пропуски.</b> Один пропуск или перерыв от 12 дней — прибавки нет, повторяется прошлый вес. Два пропуска подряд или перерыв от 21 дня — откат примерно на 10% с возвратом к прежнему весу за две-три тренировки.</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Резервная копия</h2>
+    <p class="empty">Записи хранятся в вашем Telegram и синхронизируются между устройствами. Файл-копию можно сохранить отдельно.</p>
+    <div class="io">
+      <button class="ghost" id="export">Выгрузить в файл</button>
+      <button class="ghost" id="importBtn">Загрузить из файла</button>
+      <input type="file" id="importFile" accept="application/json,.json" hidden>
+    </div>
+  </section>
+</div>
+
+<script>
+var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+if(tg){
+  try{ tg.ready(); tg.expand(); }catch(e){}
+  if(tg.colorScheme) document.documentElement.setAttribute("data-theme", tg.colorScheme);
+  try{ tg.onEvent("themeChanged", function(){ document.documentElement.setAttribute("data-theme", tg.colorScheme); }); }catch(e){}
+}
+function haptic(kind){
+  try{ if(tg&&tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(kind); }catch(e){}
+}
+
+var PROGRAM = {
+  tue: { label:"Вторник", sub:"ноги, плечи", dow:2, ex:[
+    {id:"legpress", n:"Жим платформы", sets:3, lo:8, hi:12, step:5, gear:"платформа"},
+    {id:"rdl", n:"Румынская тяга", sets:3, lo:10, hi:12, step:5, gear:"штанга"},
+    {id:"calf_press", n:"Носки в тренажёре для жима ногами", sets:5, lo:15, hi:20, step:5, gear:"платформа"},
+    {id:"lat_raise_db", n:"Отведения в стороны с гантелями", sets:3, lo:12, hi:15, step:2, gear:"гантели"},
+    {id:"ohp_db_a", n:"Жим гантелей сидя", sets:3, lo:8, hi:12, step:2, gear:"гантели"},
+    {id:"rear_db", n:"Отведения с гантелями в наклоне", sets:3, lo:12, hi:15, step:2, gear:"гантели"}
+  ]},
+  thu: { label:"Четверг", sub:"грудь, спина", dow:4, ex:[
+    {id:"db_bench", n:"Жим гантелей на прямой скамье", sets:3, lo:8, hi:12, step:2, gear:"гантели"},
+    {id:"chest_press", n:"Жим в тренажёре Converging Chest Press", sets:3, lo:8, hi:12, step:2.5, gear:"стек"},
+    {id:"db_fly", n:"Разведение гантелей на прямой скамье", sets:3, lo:10, hi:14, step:2, gear:"гантели"},
+    {id:"lat_wide", n:"Вертикальная тяга широким хватом", sets:3, lo:8, hi:12, step:2.5, gear:"стек"},
+    {id:"lat_one", n:"Вертикальная тяга одной рукой", sets:3, lo:10, hi:12, step:2.5, gear:"стек"},
+    {id:"lat_close", n:"Вертикальная тяга узким хватом", sets:3, lo:10, hi:12, step:2.5, gear:"стек"}
+  ]},
+  fri: { label:"Пятница", sub:"ноги, плечи", dow:5, ex:[
+    {id:"bss", n:"Болгарский сплит-присед с гантелями", sets:3, lo:8, hi:12, step:2, gear:"гантели"},
+    {id:"leg_curl", n:"Сгибание ног лёжа", sets:3, lo:10, hi:12, step:2.5, gear:"стек"},
+    {id:"calf_seated", n:"Носки сидя с гантелями на бёдрах", sets:5, lo:15, hi:20, step:2, gear:"гантели"},
+    {id:"ohp_db_b", n:"Жим гантелей сидя", sets:3, lo:8, hi:12, step:2, gear:"гантели"},
+    {id:"lat_cable", n:"Отведение руки в кроссовере", sets:3, lo:12, hi:15, step:2.5, gear:"блок"},
+    {id:"rear_pecdec", n:"Отведение рук назад в пек-дэк", sets:3, lo:12, hi:15, step:2.5, gear:"стек"}
+  ]},
+  sun: { label:"Воскресенье", sub:"грудь, спина", dow:0, ex:[
+    {id:"bb_row", n:"Тяга штанги в наклоне", sets:3, lo:8, hi:12, step:2.5, gear:"штанга"},
+    {id:"incline_db", n:"Жим гантелей на наклонной", sets:3, lo:8, hi:12, step:2, gear:"гантели"},
+    {id:"row_close", n:"Горизонтальная тяга узким хватом", sets:3, lo:10, hi:12, step:2.5, gear:"стек"},
+    {id:"db_row", n:"Тяга гантели к поясу", sets:3, lo:10, hi:12, step:2, gear:"гантели"},
+    {id:"crossover", n:"Сведение рук в кроссовере", sets:3, lo:12, hi:15, step:2.5, gear:"блок"},
+    {id:"pecdec", n:"Сведение рук в пек-дэк", sets:3, lo:12, hi:15, step:2.5, gear:"стек"}
+  ]}
+};
+var ORDER = ["tue","thu","fri","sun"];
+var MONTHS = ["янв","фев","мар","апр","мая","июн","июл","авг","сен","окт","ноя","дек"];
+var PREFIX = "w_";
+
+var logs = [], day = null, saving = false, store = null;
+
+function iso(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function human(s){ var p=s.split("-"); return Number(p[2])+" "+MONTHS[Number(p[1])-1]; }
+function num(v){ var x=parseFloat(String(v).replace(",",".")); return isFinite(x)&&x>0?x:0; }
+function fmt(x){ return Number(x).toFixed(1).replace(/\.0$/,"").replace(".",","); }
+function keyFor(date,d){ return PREFIX+date.replace(/-/g,"")+"_"+d; }
+
+/* ---------- storage: Telegram CloudStorage, с запасным localStorage ---------- */
 var cloud = tg && tg.CloudStorage && typeof tg.CloudStorage.getKeys === "function" ? tg.CloudStorage : null;
 
 var Store = {
