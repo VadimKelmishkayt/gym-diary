@@ -82,6 +82,20 @@ section.block h2{font-family:var(--display);font-weight:500;text-transform:upper
 .rules p{margin:0 0 8px}.rules p:last-child{margin:0}
 .rules b{color:var(--ink);font-weight:500}
 .empty{color:var(--muted);font-size:13px}
+.exlink{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;text-align:left;border-bottom:1px dashed var(--line)}
+.exlink:hover{border-bottom-color:var(--accent);color:var(--accent)}
+.backbtn{font-family:var(--body);font-size:13px;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--muted);cursor:pointer;margin-bottom:14px}
+.chartwrap{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 10px 8px;margin-top:10px}
+.chartwrap svg{display:block;width:100%;height:auto;max-width:100%}
+.tip{font-size:12.5px;color:var(--muted);min-height:1.3em;padding:6px 4px 0;font-variant-numeric:tabular-nums}
+.dot{cursor:pointer}
+.detmeta{color:var(--muted);font-size:13px;margin:2px 0 0}
+.setlist{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.setrow{display:flex;justify-content:space-between;gap:10px;align-items:baseline;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-size:13px}
+.setrow b{font-family:var(--display);font-weight:500}
+.setrow em{font-style:normal;color:var(--muted);font-variant-numeric:tabular-nums;text-align:right}
+.setrow.skip em{color:var(--hold)}
+
 .io{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 </style>
 </head>
@@ -90,6 +104,7 @@ section.block h2{font-family:var(--display);font-weight:500;text-transform:upper
   <h1>Дневник штанги</h1>
   <p class="lede">Вносите вес и повторы по подходам. Приложение сравнивает их с прошлой такой же тренировкой и говорит, где пора прибавить.</p>
 
+  <div id="main">
   <div class="bar">
     <div class="days" id="days"></div>
     <div class="meta-row">
@@ -138,7 +153,13 @@ section.block h2{font-family:var(--display);font-weight:500;text-transform:upper
       <button class="ghost" id="importBtn">Загрузить из файла</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden>
     </div>
+
+  <section class="block">
+    <h2>Вес тела</h2>
+    <div id="bwchart"></div>
   </section>
+  </div>
+  <div id="detail" hidden></div>
 </div>
 
 <script>
@@ -351,7 +372,7 @@ function render(){
     var saved=existing&&!existing.skipped&&existing.sets&&existing.sets[ex.id]?existing.sets[ex.id]:null;
     var card=document.createElement("div");
     card.className="card";
-    var html='<h3>'+(i+1)+'. '+ex.n+'</h3>'+
+    var html='<h3>'+(i+1)+'. <button class="exlink" data-ex="'+ex.id+'" type="button">'+ex.n+'</button></h3>'+
       '<p class="spec">'+ex.sets+' подхода · '+ex.lo+'–'+ex.hi+' повторов · шаг '+fmt(ex.step)+' кг · '+ex.gear+'</p>'+
       '<div class="advice"><span class="badge '+a.code+'">'+a.badge+'</span><span>'+a.text+'</span></div>';
     if(last) html+='<p class="spec">Прошлый раз '+human(last.date)+': '+last.sets.map(function(s){ return fmt(num(s.w))+"×"+num(s.r); }).join(", ")+'</p>';
@@ -369,6 +390,7 @@ function render(){
     cards.appendChild(card);
   });
   renderHist();
+  renderBW();
 }
 function renderHist(){
   var box=document.getElementById("hist");
@@ -481,6 +503,147 @@ document.getElementById("importFile").addEventListener("change",function(ev){
   };
   fr.readAsText(f);
   ev.target.value="";
+});
+
+
+/* ---------- графики и история ---------- */
+function chartSVG(series, unit, id){
+  if(series.length<2) return '<p class="empty">Нужно минимум две записи, чтобы построить график.</p>';
+  var W=680,H=230,L=48,R=16,T=16,B=36;
+  var ys=series.map(function(p){return p.y;});
+  var dmin=Math.min.apply(null,ys), dmax=Math.max.apply(null,ys);
+  var lo=dmin, hi=dmax;
+  if(lo===hi){ lo=lo-1; hi=hi+1; }
+  var padv=(hi-lo)*0.15; var ymin=lo-padv, ymax=hi+padv;
+  var ts=series.map(function(p){return Date.parse(p.x+"T00:00:00Z");});
+  var tmin=Math.min.apply(null,ts), tmax=Math.max.apply(null,ts);
+  if(tmin===tmax){ tmin-=86400000; tmax+=86400000; }
+  function X(t){ return L+(W-L-R)*(t-tmin)/(tmax-tmin); }
+  function Y(v){ return T+(H-T-B)*(1-(v-ymin)/(ymax-ymin)); }
+  var ticks=[dmin,(dmin+dmax)/2,dmax];
+  if(dmin===dmax) ticks=[dmin];
+  var g="";
+  ticks.forEach(function(v){
+    var y=Y(v);
+    g+='<line x1="'+L+'" y1="'+y.toFixed(1)+'" x2="'+(W-R)+'" y2="'+y.toFixed(1)+'" stroke="var(--line)" stroke-width="1"/>';
+    g+='<text x="'+(L-8)+'" y="'+(y+4).toFixed(1)+'" text-anchor="end" font-size="12" fill="var(--muted)" font-family="var(--body)">'+fmt(v)+'</text>';
+  });
+  var d=series.map(function(p,i){ return (i?"L":"M")+X(ts[i]).toFixed(1)+" "+Y(p.y).toFixed(1); }).join(" ");
+  var line='<path d="'+d+'" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+  var dots="";
+  series.forEach(function(p,i){
+    dots+='<circle class="dot" cx="'+X(ts[i]).toFixed(1)+'" cy="'+Y(p.y).toFixed(1)+'" r="5" fill="var(--accent)" stroke="var(--surface)" stroke-width="2" data-tip="'+human(p.x)+' — '+fmt(p.y)+' '+unit+(p.note?(' · '+p.note):'')+'"><title>'+human(p.x)+': '+fmt(p.y)+' '+unit+'</title></circle>';
+  });
+  var xl='<text x="'+L+'" y="'+(H-10)+'" font-size="12" fill="var(--muted)" font-family="var(--body)">'+human(series[0].x)+'</text>'+
+         '<text x="'+(W-R)+'" y="'+(H-10)+'" text-anchor="end" font-size="12" fill="var(--muted)" font-family="var(--body)">'+human(series[series.length-1].x)+'</text>';
+  return '<div class="chartwrap"><svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="График: '+unit+'">'+g+line+dots+xl+'</svg>'+
+         '<p class="tip" id="tip-'+id+'">'+human(series[series.length-1].x)+' — '+fmt(series[series.length-1].y)+' '+unit+'</p></div>';
+}
+
+function wireChart(root, id){
+  if(!root) return;
+  var tip=document.getElementById("tip-"+id);
+  if(!tip) return;
+  var def=tip.textContent;
+  root.querySelectorAll(".dot").forEach(function(c){
+    function on(){ tip.textContent=c.getAttribute("data-tip"); }
+    c.addEventListener("mouseenter",on);
+    c.addEventListener("click",on);
+    c.addEventListener("touchstart",on,{passive:true});
+    c.addEventListener("mouseleave",function(){ tip.textContent=def; });
+  });
+}
+
+function exSeries(exId){
+  var out=[];
+  logs.forEach(function(L){
+    if(L.skipped) return;
+    var arr=(L.sets&&L.sets[exId])||[];
+    var done=arr.filter(function(s){ return num(s.w)>0&&num(s.r)>0; });
+    if(!done.length) return;
+    var top=Math.max.apply(null,done.map(function(s){ return num(s.w); }));
+    var reps=done.filter(function(s){ return num(s.w)>=top-0.01; }).map(function(s){ return num(s.r); });
+    out.push({x:L.date, y:top, note:reps.join("/")+" повт.", sets:done});
+  });
+  out.sort(function(a,b){ return a.x<b.x?-1:(a.x>b.x?1:0); });
+  return out;
+}
+
+function bwSeries(){
+  var out=[];
+  logs.forEach(function(L){ if(!L.skipped&&num(L.bw)) out.push({x:L.date, y:num(L.bw)}); });
+  out.sort(function(a,b){ return a.x<b.x?-1:(a.x>b.x?1:0); });
+  return out;
+}
+
+function renderBW(){
+  var box=document.getElementById("bwchart");
+  if(!box) return;
+  var s=bwSeries();
+  if(s.length<2){
+    box.innerHTML='<p class="empty">Вносите вес тела при сохранении тренировки — после двух записей здесь появится график. При наборе массы с уменьшением жира важна связка: вес тела стоит на месте, а рабочие веса растут.</p>';
+    return;
+  }
+  box.innerHTML=chartSVG(s,"кг","bw");
+  wireChart(box,"bw");
+  var first=s[0].y, last=s[s.length-1].y, diff=last-first;
+  var p=document.createElement("p");
+  p.className="detmeta";
+  p.textContent="От "+human(s[0].x)+" к "+human(s[s.length-1].x)+": "+(diff>0?"+":"")+fmt(diff)+" кг.";
+  box.appendChild(p);
+}
+
+function findEx(exId){
+  for(var k in PROGRAM){
+    for(var i=0;i<PROGRAM[k].ex.length;i++) if(PROGRAM[k].ex[i].id===exId) return {ex:PROGRAM[k].ex[i], day:k};
+  }
+  return null;
+}
+
+function openDetail(exId){
+  var f=findEx(exId);
+  if(!f) return;
+  var ex=f.ex, s=exSeries(exId);
+  var box=document.getElementById("detail");
+  var html='<button class="backbtn" id="back">← К тренировке</button>'+
+    '<h2 style="font-family:var(--display);font-weight:500;font-size:20px;margin:0">'+ex.n+'</h2>'+
+    '<p class="detmeta">'+PROGRAM[f.day].label+' · коридор '+ex.lo+'–'+ex.hi+' повторов · шаг '+fmt(ex.step)+' кг</p>';
+  if(s.length){
+    var first=s[0].y, last=s[s.length-1].y, d=last-first;
+    html+='<p class="detmeta">Рабочий вес: '+fmt(first)+' → '+fmt(last)+' кг ('+(d>0?"+":"")+fmt(d)+' кг за '+s.length+' тренировок).</p>';
+  }
+  html+='<div id="exchart">'+chartSVG(s,"кг","ex")+'</div>';
+  html+='<div class="setlist">';
+  var rows=logs.filter(function(L){ return L.skipped || ((L.sets&&L.sets[exId]||[]).some(function(x){ return num(x.w)>0&&num(x.r)>0; })); });
+  if(!rows.length) html+='<p class="empty">По этому упражнению пока нет записей.</p>';
+  rows.slice(0,40).forEach(function(L){
+    if(L.skipped){
+      if(!PROGRAM[L.day]||PROGRAM[L.day].ex.every(function(e){ return e.id!==exId; })) return;
+      html+='<div class="setrow skip"><b>'+human(L.date)+'</b><em>пропущено</em></div>';
+      return;
+    }
+    var done=(L.sets[exId]||[]).filter(function(x){ return num(x.w)>0&&num(x.r)>0; });
+    if(!done.length) return;
+    var vol=0; done.forEach(function(x){ vol+=num(x.w)*num(x.r); });
+    html+='<div class="setrow"><b>'+human(L.date)+'</b><em>'+done.map(function(x){ return fmt(num(x.w))+"×"+num(x.r); }).join(", ")+' · '+Math.round(vol)+' кг</em></div>';
+  });
+  html+='</div>';
+  box.innerHTML=html;
+  box.hidden=false;
+  document.getElementById("main").hidden=true;
+  wireChart(document.getElementById("exchart"),"ex");
+  document.getElementById("back").addEventListener("click",closeDetail);
+  window.scrollTo(0,0);
+}
+function closeDetail(){
+  document.getElementById("detail").hidden=true;
+  document.getElementById("detail").innerHTML="";
+  document.getElementById("main").hidden=false;
+  window.scrollTo(0,0);
+}
+document.getElementById("cards").addEventListener("click",function(e){
+  var b=e.target.closest ? e.target.closest(".exlink") : null;
+  if(b) openDetail(b.getAttribute("data-ex"));
 });
 
 day=pickDay();
