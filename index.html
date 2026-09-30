@@ -593,6 +593,14 @@ function renderBW(){
   box.appendChild(p);
 }
 
+function plural(n, one, few, many){
+  var a=Math.abs(n)%100, b=a%10;
+  if(a>10&&a<20) return many;
+  if(b>1&&b<5) return few;
+  if(b===1) return one;
+  return many;
+}
+
 function findEx(exId){
   for(var k in PROGRAM){
     for(var i=0;i<PROGRAM[k].ex.length;i++) if(PROGRAM[k].ex[i].id===exId) return {ex:PROGRAM[k].ex[i], day:k};
@@ -610,7 +618,7 @@ function openDetail(exId){
     '<p class="detmeta">'+PROGRAM[f.day].label+' · коридор '+ex.lo+'–'+ex.hi+' повторов · шаг '+fmt(ex.step)+' кг</p>';
   if(s.length){
     var first=s[0].y, last=s[s.length-1].y, d=last-first;
-    html+='<p class="detmeta">Рабочий вес: '+fmt(first)+' → '+fmt(last)+' кг ('+(d>0?"+":"")+fmt(d)+' кг за '+s.length+' тренировок).</p>';
+    html+='<p class="detmeta">Рабочий вес: '+fmt(first)+' → '+fmt(last)+' кг ('+(d>0?"+":"")+fmt(d)+' кг за '+s.length+' '+plural(s.length,"тренировку","тренировки","тренировок")+').</p>';
   }
   html+='<div id="exchart">'+chartSVG(s,"кг","ex")+'</div>';
   html+='<div class="setlist">';
