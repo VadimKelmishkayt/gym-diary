@@ -116,6 +116,13 @@ section.block h2{font-family:var(--display);font-weight:500;text-transform:upper
 .nextlab{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);background:var(--accent-soft);border-radius:4px;padding:2px 7px;margin-right:6px}
 .nexthero{margin-top:8px;font-size:14px;color:var(--ink)}
 .nexthero b{font-weight:500}
+button.hrow{width:100%;font:inherit;text-align:left;cursor:pointer;transition:border-color .15s}
+button.hrow:hover{border-color:var(--accent)}
+.exlist{display:flex;flex-direction:column;gap:6px;margin-top:12px}
+.exrow{display:flex;justify-content:space-between;gap:10px;align-items:baseline;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:13px}
+.exrow b{font-weight:500;flex:1 1 150px}
+.exrow em{font-style:normal;color:var(--muted);font-variant-numeric:tabular-nums;text-align:right}
+.exrow.empty-ex b{color:var(--muted);font-weight:400}
 html,body{margin:0}
 body{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 </style>
@@ -763,6 +770,43 @@ function saveTech(exId, text){
   });
 }
 
+function openSession(date, block){
+  var rec=null;
+  for(var i=0;i<logs.length;i++) if(logs[i].date===date&&logs[i].block===block){ rec=logs[i]; break; }
+  if(!rec) return;
+  var name=BLOCKS[block]?BLOCKS[block].label:block;
+  var html='<button class="backbtn" id="back">← К тренировке</button>'+
+    '<h2 style="font-family:var(--display);font-weight:500;font-size:20px;margin:0">'+human(rec.date)+'</h2>'+
+    '<p class="detmeta">'+name+'</p>';
+  if(rec.skipped){
+    html+='<p class="detmeta" style="margin-top:10px">Занятие отмечено как пропущенное. В расчёте прогрессии оно учитывается как пауза.</p>';
+    showDetail(html);
+    return;
+  }
+  var total=0, setsDone=0, lines="";
+  (BLOCKS[block]?BLOCKS[block].ex:[]).forEach(function(ex){
+    var done=((rec.sets&&rec.sets[ex.id])||[]).filter(function(x){ return num(x.w)>0&&num(x.r)>0; });
+    if(!done.length){
+      lines+='<div class="exrow empty-ex"><b>'+ex.n+'</b><em>не выполнялось</em></div>';
+      return;
+    }
+    var vol=0;
+    done.forEach(function(x){ vol+=num(x.w)*num(x.r); setsDone++; });
+    total+=vol;
+    lines+='<div class="exrow"><b><button class="exlink" type="button" data-ex="'+ex.id+'">'+ex.n+'</button></b>'+
+      '<em>'+done.map(function(x){ return fmt(num(x.w))+"×"+num(x.r); }).join(", ")+' · '+Math.round(vol)+' кг</em></div>';
+  });
+  html+='<p class="detmeta" style="margin-top:8px">'+setsDone+' '+plural(setsDone,"рабочий подход","рабочих подхода","рабочих подходов")+
+        ' · тоннаж '+Math.round(total)+' кг'+(rec.bw?' · вес тела '+fmt(num(rec.bw))+' кг':'')+'</p>';
+  html+='<div class="exlist">'+lines+'</div>';
+  showDetail(html);
+  var box=document.getElementById("detail");
+  box.addEventListener("click",function(e){
+    var b=e.target.closest ? e.target.closest(".exlink") : null;
+    if(b) openDetail(b.getAttribute("data-ex"));
+  });
+}
+
 function openSchedule(){
   flushDraft();
   var html='<button class="backbtn" id="back">← К тренировке</button>'+
@@ -899,8 +943,11 @@ function renderHist(){
   if(!logs.length){ box.innerHTML='<p class="empty">Пока ничего не записано.</p>'; return; }
   box.innerHTML="";
   logs.slice(0,10).forEach(function(L){
-    var row=document.createElement("div");
+    var row=document.createElement("button");
+    row.type="button";
     row.className="hrow";
+    row.setAttribute("data-date",L.date);
+    row.setAttribute("data-block",L.block);
     var name=BLOCKS[L.block]?BLOCKS[L.block].short:L.block;
     if(L.skipped){
       row.innerHTML='<b>'+human(L.date)+' · '+name+'</b><em>пропущено</em>';
@@ -931,6 +978,10 @@ function setStatus(t,err){
   el.textContent=t; el.className="status"+(err?" err":"");
 }
 
+document.getElementById("hist").addEventListener("click",function(e){
+  var row=e.target.closest ? e.target.closest(".hrow") : null;
+  if(row&&row.getAttribute("data-date")) openSession(row.getAttribute("data-date"), row.getAttribute("data-block"));
+});
 document.getElementById("cards").addEventListener("input",scheduleDraft);
 document.getElementById("bw").addEventListener("input",scheduleDraft);
 document.addEventListener("visibilitychange",function(){ if(document.visibilityState==="hidden") flushDraft(); });
