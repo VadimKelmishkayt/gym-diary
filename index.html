@@ -103,6 +103,14 @@ section.block h2{font-family:var(--display);font-weight:500;text-transform:upper
 .blocklist{margin-top:14px}
 .blocklist h3{font-family:var(--display);font-weight:500;font-size:15px;margin:16px 0 6px}
 .blocklist ol{margin:0;padding-left:20px;color:var(--muted);font-size:13px}
+.techcard{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-top:14px}
+.techhead{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.techlab{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.techbtn{padding:6px 10px;font-size:12.5px}
+.techtext{margin:8px 0 0;font-size:14px;line-height:1.6;white-space:pre-wrap}
+.techarea{width:100%;margin-top:8px;font-family:var(--body);font-size:15px;line-height:1.55;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);resize:vertical}
+.techrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.techsave{padding:9px 16px;font-size:14px}
 html,body{margin:0}
 body{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 </style>
@@ -180,7 +188,7 @@ if(tg){
   if(tg.colorScheme) document.documentElement.setAttribute("data-theme", tg.colorScheme);
   try{ tg.onEvent("themeChanged", function(){ document.documentElement.setAttribute("data-theme", tg.colorScheme); }); }catch(e){}
 }
-var PREFIX="w_", SCHED_KEY="cfg_schedule";
+var PREFIX="w_", SCHED_KEY="cfg_schedule", NOTE_PREFIX="note_";
 var cloud = (function(){
   try{
     if(!tg || !tg.CloudStorage || typeof tg.CloudStorage.getKeys !== "function") return null;
@@ -271,38 +279,78 @@ Store.put=function(r){ return _put(r).catch(function(e){ if(cloud){ demote(); re
 Store.loadSchedule=function(){ return _loadS().catch(function(){ demote(); return _loadS(); }); };
 Store.saveSchedule=function(o){ return _saveS(o).catch(function(e){ if(cloud){ demote(); return _saveS(o); } throw e; }); };
 
+Store.loadNotes = function(){
+  if(cloud) return new Promise(function(res,rej){
+    cloud.getKeys(function(err,keys){
+      if(err) return rej(err);
+      var mine=(keys||[]).filter(function(k){ return k.indexOf(NOTE_PREFIX)===0; });
+      if(!mine.length) return res({});
+      var out={}, chunks=[];
+      for(var i=0;i<mine.length;i+=50) chunks.push(mine.slice(i,i+50));
+      var left=chunks.length;
+      chunks.forEach(function(c){
+        cloud.getItems(c,function(e2,vals){
+          if(!e2&&vals) Object.keys(vals).forEach(function(k){ if(vals[k]) out[k.slice(NOTE_PREFIX.length)]=vals[k]; });
+          if(--left===0) res(out);
+        });
+      });
+    });
+  });
+  var o={};
+  try{
+    for(var i=0;i<localStorage.length;i++){
+      var k=localStorage.key(i);
+      if(k&&k.indexOf(NOTE_PREFIX)===0){ var v=localStorage.getItem(k); if(v) o[k.slice(NOTE_PREFIX.length)]=v; }
+    }
+  }catch(e){}
+  return Promise.resolve(o);
+};
+Store.saveNote = function(id, text){
+  var k=NOTE_PREFIX+id;
+  if(cloud) return new Promise(function(res,rej){
+    if(!text) cloud.removeItem(k,function(err){ if(err) rej(err); else res(); });
+    else cloud.setItem(k,text,function(err,ok){ if(err||!ok) rej(err||{message:"отказано"}); else res(); });
+  });
+  return new Promise(function(res,rej){
+    try{ if(!text) localStorage.removeItem(k); else localStorage.setItem(k,text); res(); }catch(e){ rej(e); }
+  });
+};
+var _loadN=Store.loadNotes.bind(Store), _saveN=Store.saveNote.bind(Store);
+Store.loadNotes=function(){ return _loadN().catch(function(){ demote(); return _loadN(); }); };
+Store.saveNote=function(i,t){ return _saveN(i,t).catch(function(e){ if(cloud){ demote(); return _saveN(i,t); } throw e; }); };
+
 var BLOCKS = {
   legs1: { label:"Ноги, плечи — вариант 1", short:"Ноги/плечи 1", ex:[
-    {id:"legpress", n:"Жим платформы", sets:3, lo:8, hi:12, step:5, gear:"платформа"},
-    {id:"rdl", n:"Румынская тяга", sets:3, lo:10, hi:12, step:5, gear:"штанга"},
-    {id:"calf_press", n:"Носки в тренажёре для жима ногами", sets:5, lo:15, hi:20, step:5, gear:"платформа"},
-    {id:"lat_raise_db", n:"Отведения в стороны с гантелями", sets:3, lo:12, hi:15, step:2, gear:"гантели"},
-    {id:"ohp_db_a", n:"Жим гантелей сидя", sets:3, lo:8, hi:12, step:2, gear:"гантели"},
-    {id:"rear_db", n:"Отведения с гантелями в наклоне", sets:3, lo:12, hi:15, step:2, gear:"гантели"}
+    {id:"legpress", n:"Жим платформы", sets:3, lo:8, hi:12, step:5, gear:"платформа", tech:"Спина и таз плотно прижаты к спинке, стопы на ширине таза в середине платформы. Опускайте до угла около 90° в колене, не отрывая таз от сиденья. Выжимайте через всю стопу, колени вверху не защёлкивайте. Страховочные упоры выставлены всегда."},
+    {id:"rdl", n:"Румынская тяга", sets:3, lo:10, hi:12, step:5, gear:"штанга", tech:"Гриф идёт вплотную к ногам. Колени слегка согнуты и дальше не двигаются — движение только в тазобедренном суставе: таз уходит назад, спина прямая. Опускайтесь до ощутимого натяжения задней поверхности бедра, обычно это середина голени. Вверх — за счёт подачи таза вперёд, а не разгибания поясницы."},
+    {id:"calf_press", n:"Носки в тренажёре для жима ногами", sets:5, lo:15, hi:20, step:5, gear:"платформа", tech:"Подушечки стоп на нижнем крае платформы, пятки висят, колени почти прямые и неподвижны. Пятка медленно опускается до предела растяжения, затем стопа полностью выпрямляется. Страховочные упоры не снимайте, пружинящих отбивов внизу не делайте — ахилл не любит рывки."},
+    {id:"lat_raise_db", n:"Отведения в стороны с гантелями", sets:3, lo:12, hi:15, step:2, gear:"гантели", tech:"Лёгкий наклон корпуса вперёд, локти чуть согнуты и ведут движение впереди кистей. Поднимайте до уровня плеч, не выше. Опускайте подконтрольно: если приходится подбрасывать вес корпусом, он слишком большой."},
+    {id:"ohp_db_a", n:"Жим гантелей сидя", sets:3, lo:8, hi:12, step:2, gear:"гантели", tech:"Спинка почти вертикально, поясница прижата. Гантели в нижней точке на уровне ушей, предплечья вертикальны. Выжимайте вверх и слегка внутрь, локти вверху не защёлкивайте."},
+    {id:"rear_db", n:"Отведения с гантелями в наклоне", sets:3, lo:12, hi:15, step:2, gear:"гантели", tech:"Корпус наклонён почти параллельно полу, спина прямая, взгляд в пол. Разводите за счёт задних дельт и лопаток, локти слегка согнуты, с короткой паузой в верхней точке. Без раскачки корпусом."}
   ]},
   legs2: { label:"Ноги, плечи — вариант 2", short:"Ноги/плечи 2", ex:[
-    {id:"bss", n:"Болгарский сплит-присед с гантелями", sets:3, lo:8, hi:12, step:2, gear:"гантели"},
-    {id:"leg_curl", n:"Сгибание ног лёжа", sets:3, lo:10, hi:12, step:2.5, gear:"стек"},
-    {id:"calf_seated", n:"Носки сидя с гантелями на бёдрах", sets:5, lo:15, hi:20, step:2, gear:"гантели"},
-    {id:"ohp_db_b", n:"Жим гантелей сидя", sets:3, lo:8, hi:12, step:2, gear:"гантели"},
-    {id:"lat_cable", n:"Отведение руки в кроссовере", sets:3, lo:12, hi:15, step:2.5, gear:"блок"},
-    {id:"rear_pecdec", n:"Отведение рук назад в пек-дэк", sets:3, lo:12, hi:15, step:2.5, gear:"стек"}
+    {id:"bss", n:"Болгарский сплит-присед с гантелями", sets:3, lo:8, hi:12, step:2, gear:"гантели", tech:"Подъём задней стопы на скамью шнурками вниз. Шаг вперёд такой, чтобы в нижней точке голень передней ноги стояла вертикально, колено над серединой стопы. Опускайтесь до параллели бедра с полом, толкайтесь пяткой передней ноги. Задняя нога — только опора."},
+    {id:"leg_curl", n:"Сгибание ног лёжа", sets:3, lo:10, hi:12, step:2.5, gear:"стек", tech:"Валик на ахилле, таз прижат, бёдра от подушки не отрывать. Сгибайте до максимального сокращения, короткая пауза, медленный возврат — но не до полного разгибания, чтобы нагрузка не уходила с мышцы."},
+    {id:"calf_seated", n:"Носки сидя с гантелями на бёдрах", sets:5, lo:15, hi:20, step:2, gear:"гантели", tech:"Подушечки стоп на блине, пятки висят, колени согнуты под прямым углом. Гантели стоят на бёдрах вплотную к коленям, под них полотенце. Пятка вниз до растяжения, пауза, затем подъём на максимум. Руки только придерживают вес."},
+    {id:"ohp_db_b", n:"Жим гантелей сидя", sets:3, lo:8, hi:12, step:2, gear:"гантели", tech:"Спинка почти вертикально, поясница прижата. Гантели в нижней точке на уровне ушей, предплечья вертикальны. Выжимайте вверх и слегка внутрь, локти вверху не защёлкивайте."},
+    {id:"lat_cable", n:"Отведение руки в кроссовере", sets:3, lo:12, hi:15, step:2.5, gear:"блок", tech:"Встаньте боком к стойке, трос от нижнего блока, рабочая рука идёт через корпус. Отводите до уровня плеча, локоть слегка согнут. Корпус неподвижен, трапеция не подключается — плечо не поднимается к уху."},
+    {id:"rear_pecdec", n:"Отведение рук назад в пек-дэк", sets:3, lo:12, hi:15, step:2.5, gear:"стек", tech:"Грудь прижата к подушке, руки на уровне плеч, локти чуть согнуты. Разводите за счёт лопаток и задних дельт, короткая пауза в крайней точке. Возврат подконтрольный, без удара плит."}
   ]},
   chest1: { label:"Грудь, спина — вариант 1", short:"Грудь/спина 1", ex:[
-    {id:"db_bench", n:"Жим гантелей на прямой скамье", sets:3, lo:8, hi:12, step:2, gear:"гантели"},
-    {id:"chest_press", n:"Жим в тренажёре Converging Chest Press", sets:3, lo:8, hi:12, step:2.5, gear:"стек"},
-    {id:"db_fly", n:"Разведение гантелей на прямой скамье", sets:3, lo:10, hi:14, step:2, gear:"гантели"},
-    {id:"lat_wide", n:"Вертикальная тяга широким хватом", sets:3, lo:8, hi:12, step:2.5, gear:"стек"},
-    {id:"lat_one", n:"Вертикальная тяга одной рукой", sets:3, lo:10, hi:12, step:2.5, gear:"стек"},
-    {id:"lat_close", n:"Вертикальная тяга узким хватом", sets:3, lo:10, hi:12, step:2.5, gear:"стек"}
+    {id:"db_bench", n:"Жим гантелей на прямой скамье", sets:3, lo:8, hi:12, step:2, gear:"гантели", tech:"Лопатки сведены и прижаты, стопы упёрты в пол. Опускайте гантели до уровня груди, предплечья вертикальны, в нижней точке — лёгкое растяжение. Выжимайте по дуге вверх и внутрь, локти не защёлкивайте."},
+    {id:"chest_press", n:"Жим в тренажёре Converging Chest Press", sets:3, lo:8, hi:12, step:2.5, gear:"стек", tech:"Сиденье настройте так, чтобы рукояти были на уровне середины груди, а локти в нижней точке — чуть ниже линии плеч. Спина и лопатки прижаты к спинке. Выжимайте до почти прямых рук, возврат до лёгкого растяжения в груди."},
+    {id:"db_fly", n:"Разведение гантелей на прямой скамье", sets:3, lo:10, hi:14, step:2, gear:"гантели", tech:"Локти слегка согнуты, и этот угол не меняется всё движение. Разводите до растяжения груди, не опуская руки заметно ниже уровня плеч. Сводите по дуге. Вес здесь всегда заметно меньше, чем в жиме, иначе нагрузка уходит в переднюю капсулу плеча."},
+    {id:"lat_wide", n:"Вертикальная тяга широким хватом", sets:3, lo:8, hi:12, step:2.5, gear:"стек", tech:"Хват шире плеч, лёгкий отклон корпуса назад, грудь подана вперёд. Тяните локтями вниз к рёбрам до касания верха груди, лопатки идут вниз и назад. Вверху дайте широчайшим полностью растянуться, не роняя вес рывком."},
+    {id:"lat_one", n:"Вертикальная тяга одной рукой", sets:3, lo:10, hi:12, step:2.5, gear:"стек", tech:"Корпус зафиксирован, тяните локтём вниз, второй рукой не помогайте. В верхней точке позвольте плечу подняться за тросом — это даёт дополнительное растяжение широчайшей."},
+    {id:"lat_close", n:"Вертикальная тяга узким хватом", sets:3, lo:10, hi:12, step:2.5, gear:"стек", tech:"Ладони к себе на ширине плеч. Тяните к низу груди, локти идут вдоль корпуса. Акцент приходится на нижнюю часть широчайших и середину спины."}
   ]},
   chest2: { label:"Грудь, спина — вариант 2", short:"Грудь/спина 2", ex:[
-    {id:"bb_row", n:"Тяга штанги в наклоне", sets:3, lo:8, hi:12, step:2.5, gear:"штанга"},
-    {id:"incline_db", n:"Жим гантелей на наклонной", sets:3, lo:8, hi:12, step:2, gear:"гантели"},
-    {id:"row_close", n:"Горизонтальная тяга узким хватом", sets:3, lo:10, hi:12, step:2.5, gear:"стек"},
-    {id:"db_row", n:"Тяга гантели к поясу", sets:3, lo:10, hi:12, step:2, gear:"гантели"},
-    {id:"crossover", n:"Сведение рук в кроссовере", sets:3, lo:12, hi:15, step:2.5, gear:"блок"},
-    {id:"pecdec", n:"Сведение рук в пек-дэк", sets:3, lo:12, hi:15, step:2.5, gear:"стек"}
+    {id:"bb_row", n:"Тяга штанги в наклоне", sets:3, lo:8, hi:12, step:2.5, gear:"штанга", tech:"Корпус наклонён под 45° или ниже, спина прямая, колени слегка согнуты. Тяните к низу живота, локти вдоль корпуса, лопатки сводятся в верхней точке. Опускайте подконтрольно и не помогайте рывком поясницы."},
+    {id:"incline_db", n:"Жим гантелей на наклонной", sets:3, lo:8, hi:12, step:2, gear:"гантели", tech:"Наклон скамьи около 30°: выше — нагрузка уходит в передние дельты. Гантели в нижней точке на уровне верха груди, предплечья вертикальны. Выжимайте вверх и слегка внутрь."},
+    {id:"row_close", n:"Горизонтальная тяга узким хватом", sets:3, lo:10, hi:12, step:2.5, gear:"стек", tech:"Спина прямая всё движение: не круглите её внизу и не отклоняйтесь корпусом назад вверху. Тяните к животу, сводя лопатки, короткая пауза. Возврат до растяжения без скругления поясницы."},
+    {id:"db_row", n:"Тяга гантели к поясу", sets:3, lo:10, hi:12, step:2, gear:"гантели", tech:"Упор коленом и одноимённой рукой в скамью, спина параллельно полу. Тяните к поясу, локоть идёт вдоль корпуса. Корпус не разворачивайте — это признак слишком большого веса."},
+    {id:"crossover", n:"Сведение рук в кроссовере", sets:3, lo:12, hi:15, step:2.5, gear:"блок", tech:"Блоки сверху, шаг вперёд, лёгкий наклон корпуса, локти слегка согнуты и угол не меняется. Сводите вниз и внутрь до пересечения кистей, короткая пауза в точке сведения."},
+    {id:"pecdec", n:"Сведение рук в пек-дэк", sets:3, lo:12, hi:15, step:2.5, gear:"стек", tech:"Спина прижата к спинке, рукояти на уровне середины груди, локти чуть согнуты. Сводите до касания, пауза, разводите до растяжения — без удара плит в стопку."}
   ]}
 };
 var BLOCK_ORDER = ["legs1","legs2","chest1","chest2"];
@@ -319,7 +367,7 @@ var DEFAULT_SCHEDULE = {"2":"legs1", "4":"chest1", "5":"legs2", "0":"chest2"};
 var LEGACY = {tue:"legs1", thu:"chest1", fri:"legs2", sun:"chest2"};
 var MONTHS = ["янв","фев","мар","апр","мая","июн","июл","авг","сен","окт","ноя","дек"];
 
-var logs = [], schedule = null, cur = null, saving = false;
+var logs = [], schedule = null, cur = null, saving = false, notes = {};
 
 function iso(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
 function human(s){ var p=s.split("-"); return Number(p[2])+" "+MONTHS[Number(p[1])-1]; }
@@ -528,6 +576,7 @@ function openDetail(exId){
     var d=s[s.length-1].y-s[0].y;
     html+='<p class="detmeta">Рабочий вес: '+fmt(s[0].y)+' → '+fmt(s[s.length-1].y)+' кг ('+(d>0?"+":"")+fmt(d)+' кг за '+s.length+' '+plural(s.length,"тренировку","тренировки","тренировок")+').</p>';
   }
+  html+='<div id="techbox"></div>';
   html+='<div id="exchart">'+chartSVG(s,"кг","ex")+'</div><div class="setlist">';
   var rows=logs.filter(function(L){
     if(L.block!==f.block) return false;
@@ -543,8 +592,68 @@ function openDetail(exId){
   });
   html+='</div>';
   showDetail(html);
+  renderTech(exId);
   wireChart(document.getElementById("exchart"),"ex");
 }
+function escapeHtml(t){
+  return String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function techText(exId){
+  var f=findEx(exId);
+  if(!f) return "";
+  if(typeof notes[exId]==="string" && notes[exId].trim()) return notes[exId];
+  return f.ex.tech||"";
+}
+function isCustomTech(exId){ return typeof notes[exId]==="string" && notes[exId].trim().length>0; }
+
+function renderTech(exId){
+  var box=document.getElementById("techbox");
+  if(!box) return;
+  var custom=isCustomTech(exId);
+  box.innerHTML='<div class="techcard">'+
+    '<div class="techhead"><span class="techlab">Техника'+(custom?' · ваша редакция':'')+'</span>'+
+    '<button class="ghost techbtn" id="techedit" type="button">Изменить</button></div>'+
+    '<p class="techtext" id="techtext">'+escapeHtml(techText(exId))+'</p></div>';
+  document.getElementById("techedit").addEventListener("click",function(){ editTech(exId); });
+}
+function editTech(exId){
+  var box=document.getElementById("techbox");
+  var custom=isCustomTech(exId);
+  box.innerHTML='<div class="techcard">'+
+    '<div class="techhead"><span class="techlab">Описание техники</span></div>'+
+    '<textarea class="techarea" id="techinput" rows="7"></textarea>'+
+    '<div class="techrow"><button class="primary techsave" id="techsave" type="button">Сохранить</button>'+
+    '<button class="ghost" id="techcancel" type="button">Отмена</button>'+
+    (custom?'<button class="ghost" id="techreset" type="button">Вернуть исходное</button>':'')+
+    '<span class="status" id="techstatus"></span></div></div>';
+  var inp=document.getElementById("techinput");
+  inp.value=techText(exId);
+  inp.focus();
+  document.getElementById("techcancel").addEventListener("click",function(){ renderTech(exId); });
+  var reset=document.getElementById("techreset");
+  if(reset) reset.addEventListener("click",function(){ saveTech(exId,""); });
+  document.getElementById("techsave").addEventListener("click",function(){ saveTech(exId, inp.value); });
+}
+function saveTech(exId, text){
+  var f=findEx(exId);
+  var t=String(text||"").trim();
+  if(t.length>1500){
+    var st=document.getElementById("techstatus");
+    if(st){ st.textContent="Слишком длинно: до 1500 символов."; st.className="status err"; }
+    return;
+  }
+  if(f && t===String(f.ex.tech||"").trim()) t="";
+  var st2=document.getElementById("techstatus");
+  if(st2){ st2.textContent="Сохраняю…"; st2.className="status"; }
+  Store.saveNote(exId,t).then(function(){
+    if(t) notes[exId]=t; else delete notes[exId];
+    renderTech(exId);
+  },function(e){
+    var st=document.getElementById("techstatus");
+    if(st){ st.textContent="Не удалось сохранить: "+((e&&e.message)||"ошибка")+"."; st.className="status err"; }
+  });
+}
+
 function openSchedule(){
   var html='<button class="backbtn" id="back">← К тренировке</button>'+
     '<h2 style="font-family:var(--display);font-weight:500;font-size:20px;margin:0">Расписание недели</h2>'+
@@ -795,7 +904,7 @@ Store.loadSchedule().then(function(s){
   }
   cur=pickCurrent();
   if(cur) document.getElementById("date").value=nextDateFor(cur.wd);
-  return Store.loadAll();
+  return Store.loadNotes().then(function(n){ notes=n||{}; }, function(){ notes={}; }).then(function(){ return Store.loadAll(); });
 }).then(function(arr){
   logs=cleanLogs(arr); sortLogs();
   render();
