@@ -689,7 +689,10 @@ function openSchedule(){
     }
     schedule=next;
     Store.saveSchedule(next).then(function(){
-      if(!cur||schedule[String(cur.wd)]!==cur.block) cur=pickCurrent();
+      if(!cur||schedule[String(cur.wd)]!==cur.block){
+        cur=pickCurrent();
+        if(cur) document.getElementById("date").value=nextDateFor(cur.wd);
+      }
       showMain(); render();
       setStatus("Расписание сохранено.",false);
     },function(e){
