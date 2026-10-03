@@ -111,6 +111,10 @@ section.block h2{font-family:var(--display);font-weight:500;text-transform:upper
 .techarea{width:100%;margin-top:8px;font-family:var(--body);font-size:15px;line-height:1.55;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);resize:vertical}
 .techrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .techsave{padding:9px 16px;font-size:14px}
+.nextline{margin:6px 0 0;font-size:13px;color:var(--ink)}
+.nextlab{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);background:var(--accent-soft);border-radius:4px;padding:2px 7px;margin-right:6px}
+.nexthero{margin-top:8px;font-size:14px;color:var(--ink)}
+.nexthero b{font-weight:500}
 html,body{margin:0}
 body{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 </style>
@@ -188,7 +192,7 @@ if(tg){
   if(tg.colorScheme) document.documentElement.setAttribute("data-theme", tg.colorScheme);
   try{ tg.onEvent("themeChanged", function(){ document.documentElement.setAttribute("data-theme", tg.colorScheme); }); }catch(e){}
 }
-var PREFIX="w_", SCHED_KEY="cfg_schedule", NOTE_PREFIX="note_";
+var PREFIX="w_", SCHED_KEY="cfg_schedule", NOTE_PREFIX="note_", DRAFT_PREFIX="d_";
 var cloud = (function(){
   try{
     if(!tg || !tg.CloudStorage || typeof tg.CloudStorage.getKeys !== "function") return null;
@@ -319,6 +323,55 @@ var _loadN=Store.loadNotes.bind(Store), _saveN=Store.saveNote.bind(Store);
 Store.loadNotes=function(){ return _loadN().catch(function(){ demote(); return _loadN(); }); };
 Store.saveNote=function(i,t){ return _saveN(i,t).catch(function(e){ if(cloud){ demote(); return _saveN(i,t); } throw e; }); };
 
+function draftStoreKey(block,date){ return DRAFT_PREFIX+date.replace(/-/g,"")+"_"+block; }
+Store.loadDrafts = function(){
+  function parse(k,v,out){ try{ var o=JSON.parse(v); if(o&&o.block&&o.date) out[o.block+"|"+o.date]={bw:o.bw||"", sets:o.sets||{}}; }catch(e){} }
+  if(cloud) return new Promise(function(res,rej){
+    cloud.getKeys(function(err,keys){
+      if(err) return rej(err);
+      var mine=(keys||[]).filter(function(k){ return k.indexOf(DRAFT_PREFIX)===0; });
+      if(!mine.length) return res({});
+      var out={}, chunks=[];
+      for(var i=0;i<mine.length;i+=50) chunks.push(mine.slice(i,i+50));
+      var left=chunks.length;
+      chunks.forEach(function(c){
+        cloud.getItems(c,function(e2,vals){
+          if(!e2&&vals) Object.keys(vals).forEach(function(k){ parse(k,vals[k],out); });
+          if(--left===0) res(out);
+        });
+      });
+    });
+  });
+  var o={};
+  try{
+    for(var i=0;i<localStorage.length;i++){
+      var k=localStorage.key(i);
+      if(k&&k.indexOf(DRAFT_PREFIX)===0) parse(k,localStorage.getItem(k),o);
+    }
+  }catch(e){}
+  return Promise.resolve(o);
+};
+Store.saveDraft = function(block,date,data){
+  var k=draftStoreKey(block,date);
+  var v=JSON.stringify({block:block, date:date, bw:data.bw||"", sets:data.sets||{}, ts:Date.now()});
+  try{ localStorage.setItem(k,v); }catch(e){}
+  if(v.length>4000) return Promise.resolve();
+  if(cloud) return new Promise(function(res,rej){
+    cloud.setItem(k,v,function(err,ok){ if(err||!ok) rej(err||{message:"отказано"}); else res(); });
+  });
+  return Promise.resolve();
+};
+Store.clearDraft = function(block,date){
+  var k=draftStoreKey(block,date);
+  try{ localStorage.removeItem(k); }catch(e){}
+  if(cloud) return new Promise(function(res,rej){
+    cloud.removeItem(k,function(err){ if(err) rej(err); else res(); });
+  });
+  return Promise.resolve();
+};
+var _loadD=Store.loadDrafts.bind(Store);
+Store.loadDrafts=function(){ return _loadD().catch(function(){ demote(); return _loadD(); }); };
+
 var BLOCKS = {
   legs1: { label:"Ноги, плечи — вариант 1", short:"Ноги/плечи 1", ex:[
     {id:"legpress", n:"Жим платформы", sets:3, lo:8, hi:12, step:5, gear:"платформа", tech:"Спина и таз плотно прижаты к спинке, стопы на ширине таза в середине платформы. Опускайте до угла около 90° в колене, не отрывая таз от сиденья. Выжимайте через всю стопу, колени вверху не защёлкивайте. Страховочные упоры выставлены всегда."},
@@ -367,7 +420,7 @@ var DEFAULT_SCHEDULE = {"2":"legs1", "4":"chest1", "5":"legs2", "0":"chest2"};
 var LEGACY = {tue:"legs1", thu:"chest1", fri:"legs2", sun:"chest2"};
 var MONTHS = ["янв","фев","мар","апр","мая","июн","июл","авг","сен","окт","ноя","дек"];
 
-var logs = [], schedule = null, cur = null, saving = false, notes = {};
+var logs = [], schedule = null, cur = null, saving = false, notes = {}, drafts = {}, draftTimer = null;
 
 function iso(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
 function human(s){ var p=s.split("-"); return Number(p[2])+" "+MONTHS[Number(p[1])-1]; }
@@ -543,6 +596,58 @@ function renderBW(){
   box.appendChild(p);
 }
 
+/* ---------- черновик незаконченной тренировки ---------- */
+function draftKey(block, date){ return block+"|"+date; }
+function readForm(){
+  if(!cur) return null;
+  var date=document.getElementById("date").value;
+  if(!date) return null;
+  var sets={}, any=false;
+  BLOCKS[cur.block].ex.forEach(function(ex){
+    var arr=[];
+    for(var s=0;s<ex.sets;s++){
+      var we=document.getElementById("w-"+cur.block+"-"+ex.id+"-"+s);
+      var re=document.getElementById("r-"+cur.block+"-"+ex.id+"-"+s);
+      var w=we?String(we.value||"").trim():"", r=re?String(re.value||"").trim():"";
+      if(w||r) any=true;
+      arr.push({w:w, r:r});
+    }
+    sets[ex.id]=arr;
+  });
+  var bw=String(document.getElementById("bw").value||"").trim();
+  if(bw) any=true;
+  return {key:draftKey(cur.block,date), block:cur.block, date:date, bw:bw, sets:sets, any:any};
+}
+function flushDraft(){
+  if(draftTimer){ clearTimeout(draftTimer); draftTimer=null; }
+  var f=readForm();
+  if(!f) return Promise.resolve();
+  if(!f.any){
+    if(drafts[f.key]){ delete drafts[f.key]; return Store.clearDraft(f.block,f.date).catch(function(){}); }
+    return Promise.resolve();
+  }
+  drafts[f.key]={bw:f.bw, sets:f.sets};
+  return Store.saveDraft(f.block,f.date,{bw:f.bw, sets:f.sets}).catch(function(){});
+}
+function scheduleDraft(){
+  if(draftTimer) clearTimeout(draftTimer);
+  draftTimer=setTimeout(function(){ draftTimer=null; flushDraft(); },1000);
+}
+function dropDraft(block,date){
+  delete drafts[draftKey(block,date)];
+  return Store.clearDraft(block,date).catch(function(){});
+}
+
+/* ---------- рекомендация на следующий раз ---------- */
+function nextTime(ex, block){
+  var last=lastFor(block, ex.id, null);
+  if(!last) return null;
+  var a=advise(ex,last,null);
+  if(!a.target) return null;
+  var reps = a.code==="up" ? ex.lo : (a.code==="reps" ? ex.hi : ex.lo);
+  return {weight:a.target, reps:reps, code:a.code, from:last.date};
+}
+
 /* ---------- экраны ---------- */
 function findEx(exId){
   for(var k in BLOCKS){
@@ -568,6 +673,7 @@ function showDetail(html){
 function openDetail(exId){
   var f=findEx(exId);
   if(!f) return;
+  flushDraft();
   var ex=f.ex, s=exSeries(exId);
   var html='<button class="backbtn" id="back">← К тренировке</button>'+
     '<h2 style="font-family:var(--display);font-weight:500;font-size:20px;margin:0">'+ex.n+'</h2>'+
@@ -576,6 +682,8 @@ function openDetail(exId){
     var d=s[s.length-1].y-s[0].y;
     html+='<p class="detmeta">Рабочий вес: '+fmt(s[0].y)+' → '+fmt(s[s.length-1].y)+' кг ('+(d>0?"+":"")+fmt(d)+' кг за '+s.length+' '+plural(s.length,"тренировку","тренировки","тренировок")+').</p>';
   }
+  var nx=nextTime(ex,f.block);
+  if(nx) html+='<p class="detmeta nexthero">Цель на следующий раз: <b>'+fmt(nx.weight)+' кг × '+nx.reps+' '+plural(nx.reps,"повтор","повтора","повторов")+'</b> в каждом подходе.</p>';
   html+='<div id="techbox"></div>';
   html+='<div id="exchart">'+chartSVG(s,"кг","ex")+'</div><div class="setlist">';
   var rows=logs.filter(function(L){
@@ -655,6 +763,7 @@ function saveTech(exId, text){
 }
 
 function openSchedule(){
+  flushDraft();
   var html='<button class="backbtn" id="back">← К тренировке</button>'+
     '<h2 style="font-family:var(--display);font-weight:500;font-size:20px;margin:0">Расписание недели</h2>'+
     '<p class="detmeta">Назначьте каждому дню блок упражнений или оставьте отдых. История считается по блоку, так что день недели можно менять без потери прогрессии.</p><div style="margin-top:14px">';
@@ -750,23 +859,32 @@ function render(){
   document.getElementById("skip").checked=!!(existing&&existing.skipped);
   syncSkip();
   cards.innerHTML="";
+  var draft=drafts[draftKey(block,date)]||null;
+  if(draft&&draft.bw&&!document.getElementById("bw").value) document.getElementById("bw").value=draft.bw;
   BLOCKS[block].ex.forEach(function(ex,i){
     var r=adviceFor(ex,block,date), last=r.last, a=r.a;
     var saved=existing&&!existing.skipped&&existing.sets&&existing.sets[ex.id]?existing.sets[ex.id]:null;
+    var dft=draft&&draft.sets?draft.sets[ex.id]:null;
+    var nx=nextTime(ex,block);
     var card=document.createElement("div");
     card.className="card";
     var html='<h3>'+(i+1)+'. <button class="exlink" data-ex="'+ex.id+'" type="button">'+ex.n+'</button></h3>'+
       '<p class="spec">'+ex.sets+' '+plural(ex.sets,"подход","подхода","подходов")+' · '+ex.lo+'–'+ex.hi+' повторов · шаг '+fmt(ex.step)+' кг · '+ex.gear+'</p>'+
       '<div class="advice"><span class="badge '+a.code+'">'+a.badge+'</span><span>'+a.text+'</span></div>';
     if(last) html+='<p class="spec">Прошлый раз '+human(last.date)+': '+last.sets.map(function(s){ return fmt(num(s.w))+"×"+num(s.r); }).join(", ")+'</p>';
+    if(nx) html+='<p class="nextline"><span class="nextlab">Цель на следующий раз</span> '+fmt(nx.weight)+' кг × '+nx.reps+' '+plural(nx.reps,"повтор","повтора","повторов")+' в каждом подходе</p>';
     html+='<div class="sets"><span class="hd"></span><span class="hd">Вес, кг</span><span class="hd">Повторы</span>';
     for(var s=0;s<ex.sets;s++){
       var v=saved&&saved[s]?saved[s]:null;
       var w=v&&num(v.w)?fmt(num(v.w)):(a.target&&!saved?fmt(a.target):"");
       var rp=v&&num(v.r)?num(v.r):"";
+      if(dft&&dft[s]){
+        if(dft[s].w!==undefined&&dft[s].w!=="") w=dft[s].w;
+        if(dft[s].r!==undefined&&dft[s].r!=="") rp=dft[s].r;
+      }
       html+='<span class="n">'+(s+1)+'</span>'+
-        '<input type="number" inputmode="decimal" step="0.5" min="0" id="w-'+block+'-'+ex.id+'-'+s+'" value="'+w+'" aria-label="'+ex.n+', подход '+(s+1)+', вес">'+
-        '<input type="number" inputmode="numeric" step="1" min="0" id="r-'+block+'-'+ex.id+'-'+s+'" value="'+rp+'" aria-label="'+ex.n+', подход '+(s+1)+', повторы">';
+        '<input type="text" inputmode="decimal" autocomplete="off" id="w-'+block+'-'+ex.id+'-'+s+'" value="'+w+'" aria-label="'+ex.n+', подход '+(s+1)+', вес">'+
+        '<input type="text" inputmode="numeric" autocomplete="off" id="r-'+block+'-'+ex.id+'-'+s+'" value="'+rp+'" aria-label="'+ex.n+', подход '+(s+1)+', повторы">';
     }
     html+='</div>';
     card.innerHTML=html;
@@ -812,7 +930,12 @@ function setStatus(t,err){
   el.textContent=t; el.className="status"+(err?" err":"");
 }
 
-document.getElementById("date").addEventListener("change",render);
+document.getElementById("cards").addEventListener("input",scheduleDraft);
+document.getElementById("bw").addEventListener("input",scheduleDraft);
+document.addEventListener("visibilitychange",function(){ if(document.visibilityState==="hidden") flushDraft(); });
+window.addEventListener("pagehide",flushDraft);
+window.addEventListener("blur",flushDraft);
+document.getElementById("date").addEventListener("change",function(){ flushDraft(); render(); });
 document.getElementById("skip").addEventListener("change",syncSkip);
 document.getElementById("cards").addEventListener("click",function(e){
   var b=e.target.closest ? e.target.closest(".exlink") : null;
@@ -844,6 +967,7 @@ document.getElementById("save").addEventListener("click",function(){
   saving=true; setStatus("Сохраняю…",false);
   var rec={date:date, block:cur.block, skipped:skipped, bw:skipped?null:(num(document.getElementById("bw").value)||null), sets:sets, ts:Date.now()};
   Store.put(rec).then(function(){
+    dropDraft(rec.block, rec.date);
     logs=cleanLogs([rec].concat(logs.filter(function(L){ return !(L.date===rec.date&&L.block===rec.block); })));
     sortLogs(); render();
     setStatus(skipped?("Пропуск "+human(date)+" отмечен."):("Тренировка "+human(date)+" сохранена."),false);
@@ -907,7 +1031,9 @@ Store.loadSchedule().then(function(s){
   }
   cur=pickCurrent();
   if(cur) document.getElementById("date").value=nextDateFor(cur.wd);
-  return Store.loadNotes().then(function(n){ notes=n||{}; }, function(){ notes={}; }).then(function(){ return Store.loadAll(); });
+  return Store.loadNotes().then(function(n){ notes=n||{}; }, function(){ notes={}; })
+    .then(function(){ return Store.loadDrafts().then(function(d){ drafts=d||{}; }, function(){ drafts={}; }); })
+    .then(function(){ return Store.loadAll(); });
 }).then(function(arr){
   logs=cleanLogs(arr); sortLogs();
   render();
